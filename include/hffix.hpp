@@ -534,7 +534,7 @@ public:
     \param s String.
     */
     void push_back_body(std::string const& s) {
-        push_back_body(s.data(), s.data() + s.end());
+        push_back_body(s.data(), s.data() + s.size());
     }
 
     /*!
