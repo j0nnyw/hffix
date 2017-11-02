@@ -522,6 +522,32 @@ public:
         push_back_string(tag, s.data(), s.data() + s.size());
     }
 
+    /*!
+    \brief Append a string "body" to the message.
+
+    The string "body" component might represent the body elements of a particular FIX MsgType. By using
+    push_back_body, the body can be joined to the FIX header.
+
+    The entire, literal contents of s will be copied to the output buffer, so if you are using std::wstring
+    you may need to first convert from UTF-32 to UTF-8, or do some other encoding transformation.
+
+    \param s String.
+    */
+    void push_back_body(std::string const& s) {
+        push_back_body(s.data(), s.data() + s.end());
+    }
+
+    /*!
+    \brief Append a string "body" to the message.
+    \param begin Pointer to the beginning of the string.
+    \param end Pointer to past-the-end of the string.
+    */
+    void push_back_body(char const* begin, char const* end) {
+        memcpy(next_, begin, end - begin);
+        next_ += (end - begin);
+        *next_++ = '\x01';
+    }
+
 
 #if __cplusplus >= 201703L
     /*!
