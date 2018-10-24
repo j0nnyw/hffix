@@ -10,7 +10,7 @@ doc : doc/html/index.html
 
 doc/html/index.html : doc/hffix.css include/hffix.hpp include/hffix_fields.hpp doc/Doxyfile README.md
 	@echo -e "${YELLOW}*** Generating Doxygen in doc/html/ ...${NORMAL}"
-	cd doc;doxygen Doxyfile
+	cd doc;rm -r html;doxygen Doxyfile
 	@echo -e "${YELLOW}*** Generated Doxygen in doc/html/${NORMAL}"
 
 clean : clean-bin
@@ -83,10 +83,10 @@ examples : test/bin/writer01 test/bin/reader01
 
 unit_tests :
 	@echo -e "${YELLOW}*** Building test/bin/unit_tests ...${NORMAL}"
-	$(CXX) $(CXXFLAGS) -o test/bin/unit_tests test/src/unit_tests.cpp
+	$(CXX) $(CXXFLAGS) -std=c++11 -o test/bin/unit_tests test/src/unit_tests.cpp
 	@echo -e "${YELLOW}*** Built test/bin/unit_tests ...${NORMAL}"
 	@echo -e "${YELLOW}*** Running test/bin/unit_tests ...${NORMAL}"
-	test/bin/unit_tests
+	test/bin/unit_tests --color_output=true
 	@echo -e "${YELLOW}*** Passed test/bin/unit_tests ...${NORMAL}"
 
 ctags :

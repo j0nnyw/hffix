@@ -39,11 +39,15 @@ or implied, of T3 IP, LLC.
 #include <cstring>          // for memcpy
 #include <string>           //
 #include <algorithm>        // for is_tag_a_data_length
+#include <numeric>          // for accumulate
 #include <iostream>         // for operator<<()
 #include <limits>           // for numeric_limits<>::is_signed
 #include <stdexcept>        // for exceptions
 #if __cplusplus >= 201703L
 #include <string_view>      // for push_back_string()
+#endif
+#if __cplusplus >= 201103L
+#include <cstdint>          // for std::uint8_t
 #endif
 
 #ifndef HFFIX_NO_BOOST_DATETIME
@@ -62,6 +66,13 @@ namespace hffix {
 /* @cond EXCLUDE */
 
 namespace details {
+
+inline void throw_range_error() {
+    throw std::out_of_range("hffix message_writer buffer full");
+}
+
+template <std::size_t N>
+std::ptrdiff_t len(char const (&)[N]) { return std::ptrdiff_t(N - 1); }
 
 /*
 \brief Internal ascii-to-integer conversion.
@@ -123,9 +134,10 @@ Writes an integer out as ascii.
 \tparam Int_type Type of integer to be converted.
 \param number Value of the integer to be converted.
 \param buffer Pointer to location for the ascii to be written.
+\param end Past-the-end of the buffer, to check for overflow.
 \return Pointer to past-the-end of the ascii that was written.
 */
-template<typename Int_type> char* itoa(Int_type number, char* buffer)
+template<typename Int_type> char* itoa(Int_type number, char* buffer, char* end)
 {
     // Write out the digits in reverse order.
     bool isnegative(false);
@@ -136,11 +148,13 @@ template<typename Int_type> char* itoa(Int_type number, char* buffer)
 
     char*b = buffer;
     do {
+        if (b >= end) details::throw_range_error();
         *b++ = '0' + (number % 10);
         number /= 10;
     } while(number);
 
     if (isnegative) {
+        if (b >= end) details::throw_range_error();
         *b++ = '-';
     }
 
@@ -159,13 +173,15 @@ Writes an unsigned integer out as ascii.
 \tparam Int_type Type of integer to be converted.
 \param number Value of the integer to be converted.
 \param buffer Pointer to location for the ascii to be written.
+\param end Past-the-end of the buffer, to check for overflow.
 \return Pointer to past-the-end of the ascii that was written.
 */
-template<typename Uint_type> char* utoa(Uint_type number, char* buffer)
+template<typename Uint_type> char* utoa(Uint_type number, char* buffer, char* end)
 {
     // Write out the digits in reverse order.
     char*b = buffer;
     do {
+        if (b >= end) details::throw_range_error();
         *b++ = '0' + (number % 10);
         number /= 10;
     } while(number);
@@ -228,9 +244,10 @@ Non-normalized. The exponent parameter must be less than or equal to zero.
 \param mantissa The mantissa of the decimal float.
 \param exponent The exponent of the decimal float. Must be less than or equal to zero.
 \param buffer Pointer to location for the ascii to be written.
+\param end Past-the-end of the buffer, to check for overflow.
 \return Pointer to past-the-end of the ascii that was written.
 */
-template<typename Int_type> char* dtoa(Int_type mantissa, Int_type exponent, char* buffer)
+template<typename Int_type> char* dtoa(Int_type mantissa, Int_type exponent, char* buffer, char* end)
 {
     // Write out the digits in reverse order.
     bool isnegative(false);
@@ -241,14 +258,17 @@ template<typename Int_type> char* dtoa(Int_type mantissa, Int_type exponent, cha
 
     char*b = buffer;
     do {
+        if (b >= end) details::throw_range_error();
         *b++ = '0' + (mantissa % 10);
         mantissa /= 10;
         if (++exponent == 0) {
+            if (b >= end) details::throw_range_error();
             *b++ = '.';
         }
     } while(mantissa > 0 || exponent < 1);
 
     if (isnegative) {
+        if (b >= end) details::throw_range_error();
         *b++ = '-';
     }
 
@@ -334,17 +354,37 @@ inline bool atotime(
  *
  * Given a buffer, the message_writer will write a FIX message to the buffer. message_writer does not take ownership of the buffer.
  *
+ * <h3>Usage</h3>
+ *
  * The message_writer interface is patterned after
  * Back Insertion Sequence Containers, with overloads of `push_back` for different FIX field data types.
  *
- * The push_back_header() method will write the _BeginString_ and _BodyLength_ fields to the message,
- * but the FIX Standard Message Header requires also _MsgType_, _SenderCompID_, _TargetCompID_, _MsgSeqNum_ and _SendingTime_.
+ * The `push_back_header()` method will write the _BeginString_ and _BodyLength_ fields to the message,
+ * and the FIX Standard Message Header requires also _MsgType_, _SenderCompID_, _TargetCompID_, _MsgSeqNum_ and _SendingTime_.
  * You must write those fields yourself, starting with _MsgType_.
  *
- * After calling all other push_back methods and before sending the message, you must call push_back_trailer(),
+ * After calling all other `push_back` methods and before sending the message, you must call push_back_trailer(),
  * which will write the CheckSum field for you.
  *
-*/
+ * <h3>Extension</h3>
+ *
+ * Keep in mind that if you don't like the way any of these `push_back` methods
+ * perform serialization, then you can always do your own serialization for any
+ * data type, and then append it to the message by `push_back_string()`.
+ *
+ * For example, these two statements are equivalent for `hffix::message_writer w`.
+ *
+ * \code
+ * w.push_back_int   (hffix::tag::HeartBtInt, 12);
+ * w.push_back_string(hffix::tag::HeartBtInt, "12");
+ * \endcode
+ *
+ * For another example, if a trading peer has extended FIX for femtosecond timestamp precision, then a custom timestamp can be serialized to a string and then written to a field.
+ *
+ * \code
+ * w.push_back_string(hffix::tag::SendingTime, "20180309-13:46:01.0123456789123456");
+ * \endcode
+ */
 class message_writer {
 public:
 
@@ -356,7 +396,8 @@ public:
     message_writer(char* buffer, size_t size):
         buffer_(buffer),
         buffer_end_(buffer + size),
-        next_(buffer) {
+        next_(buffer),
+        body_length_(NULL) {
     }
 
     /*!
@@ -367,7 +408,21 @@ public:
     message_writer(char* begin, char* end) :
         buffer_(begin),
         buffer_end_(end),
-        next_(begin) {
+        next_(begin),
+        body_length_(NULL) {
+    }
+
+    /*!
+    \brief Construct on an array reference to a buffer.
+    \tparam N The size of the array.
+    \param buffer An array reference. The writer will write into the entire array of length _N_.
+    */
+    template<size_t N>
+    message_writer(char(&buffer)[N]) :
+        buffer_(buffer),
+        buffer_end_(&(buffer[N])),
+        next_(buffer),
+        body_length_(NULL) {
     }
 
 
@@ -405,6 +460,20 @@ public:
         return next_;
     }
 
+    /*!
+     * \brief Total available buffer size, including buffer already written to by this message.
+     */
+    size_t buffer_size() const {
+        return buffer_end_ - buffer_;
+    }
+
+    /*!
+     * \brief Remaining available buffer size. Excludes buffer already written to by this message.
+     */
+    size_t buffer_size_remaining() const {
+        return buffer_end_ - next_;
+    }
+
     //@}
 
     /*! \name Transport Fields */
@@ -417,8 +486,15 @@ public:
      *
      * \pre No other `push_back` method has yet been called.
      * \param begin_string_version The value for the BeginString FIX field. Should probably be "FIX.4.2" or "FIX.4.3" or "FIX.4.4" or "FIXT.1.1" (for FIX 5.0).
-    */
+     *
+     * \throw std::out_of_range When the remaining buffer size is too small.
+     * \throw std::logic_error When called more than once for a single message.
+     */
     void push_back_header(char const* begin_string_version) {
+        if (body_length_) throw std::logic_error("hffix message_writer.push_back_header called twice");
+        if (buffer_end_ - next_ < 2 + std::ptrdiff_t(strlen(begin_string_version)) + 3 + 7) {
+            details::throw_range_error();
+        }
         memcpy(next_, "8=", 2);
         next_ += 2;
         memcpy(next_, begin_string_version, std::strlen(begin_string_version));
@@ -444,31 +520,45 @@ public:
      * \param calculate_checksum If this flag is set to false, then instead of iterating over the entire message and
      * calculating the CheckSum, the standard trailer will simply write CheckSum=000. This is fine if you're sending
      * the message to a FIX parser that, like High Frequency FIX Parser, doesn't care about the CheckSum.
-    */
+     *
+     * \throw std::out_of_range When the remaining buffer size is too small.
+     * \throw std::logic_error When called before message_writer::push_back_header()
+     */
     void push_back_trailer(bool calculate_checksum = true) {
         // Calculate and write out the BodyLength.
         // BodyLength does not include the SOH character after the BodyLength field.
         // BodyLength does not include the SOH character before the CheckSum field.
-        size_t bodylength = next_ - (body_length_ + 7);
-        for(char* b = body_length_ + 5; b >= body_length_; --b) {
-            *b = '0' + (bodylength % 10);
-            bodylength /= 10;
+        if (!body_length_) {
+            throw std::logic_error("hffix message_writer.push_back_trailer called before message_writer.push_back_header");
+        }
+
+        size_t const len = next_ - (body_length_ + 7);
+        body_length_[0] = '0' + (len / 100000) % 10;
+        body_length_[1] = '0' + (len / 10000) % 10;
+        body_length_[2] = '0' + (len / 1000) % 10;
+        body_length_[3] = '0' + (len / 100) % 10;
+        body_length_[4] = '0' + (len / 10) % 10;
+        body_length_[5] = '0' + len % 10;
+
+        if (buffer_end_ - next_ < 7) {
+            details::throw_range_error();
         }
 
         // write out the CheckSum after optionally calculating it
         if (calculate_checksum) {
-            size_t checksum(0);
-            char* b = buffer_;
-            while(b < next_) checksum += *b++;
-            checksum = checksum % 256;
+#if __cplusplus >= 201103L
+            using std::uint8_t;
+#else
+            typedef unsigned char uint8_t;
+#endif
+            uint8_t const checksum = std::accumulate(buffer_, next_, uint8_t(0));
 
             memcpy(next_, "10=", 3);
             next_ += 3;
+            next_[0] = '0' + ((checksum / 100) % 10);
+            next_[1] = '0' + ((checksum / 10) % 10);
+            next_[2] = '0' + (checksum % 10);
 
-            for (char* b = next_ + 2; b >= next_; --b) {
-                *b = '0' + (checksum % 10);
-                checksum /= 10;
-            }
             next_ += 3;
             *next_++ = '\x01';
         } else {
@@ -485,12 +575,18 @@ public:
 
     /*!
     \brief Append a string field to the message.
+
     \param tag FIX tag.
     \param begin Pointer to the beginning of the string.
     \param end Pointer to past-the-end of the string.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_string(int tag, char const* begin, char const* end) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < (end - begin) + 2) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         memcpy(next_, begin, end - begin);
         next_ += (end - begin);
@@ -499,14 +595,18 @@ public:
 
     /*!
     \brief Append a string field to the message.
+
     \param tag FIX tag.
     \param cstring Pointer to the beginning of a C-style null-terminated string.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_string(int tag, char const* cstring) {
-        next_ = details::itoa(tag, next_);
-        *next_++ = '=';
-        while(*cstring) *next_++ = *cstring++;
-        *next_++ = '\x01';
+        // Find the end of the cstring, like strlen, but throw if the cstring
+        // is longer than the remaining buffer.
+        char const* cstring_end = (char const*)memchr(cstring, 0, buffer_end_ - next_);
+        if (cstring_end) push_back_string(tag, cstring, cstring_end);
+        else details::throw_range_error();
     }
 
     /*!
@@ -517,6 +617,8 @@ public:
 
     \param tag FIX tag.
     \param s String.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_string(int tag, std::string const& s) {
         push_back_string(tag, s.data(), s.data() + s.size());
@@ -557,19 +659,27 @@ public:
 
     \param tag FIX tag.
     \param s String.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_string(int tag, std::string_view s) {
-        push_back_string(tag, &*cbegin(s), &*cend(s));
+        push_back_string(tag, s.begin(), s.end());
     }
 #endif
 
     /*!
     \brief Append a char field to the message.
+
     \param tag FIX tag.
     \param character An ascii character.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_char(int tag, char character) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < 3) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         *next_++ = character;
         *next_++ = '\x01';
@@ -581,14 +691,19 @@ public:
 //@{
     /*!
     \brief Append an integer field to the message.
+
     \tparam Int_type Type of integer.
     \param tag FIX tag.
     \param number Integer value.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     template<typename Int_type> void push_back_int(int tag, Int_type number) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (next_ >= buffer_end_) details::throw_range_error();
         *next_++ = '=';
-        next_ = details::itoa(number, next_);
+        next_ = details::itoa(number, next_, buffer_end_);
+        if (next_ >= buffer_end_) details::throw_range_error();
         *next_++ = '\x01';
     }
 
@@ -609,11 +724,15 @@ public:
     \param tag FIX tag.
     \param mantissa The mantissa of the decimal float.
     \param exponent The exponent of the decimal float. Must be less than or equal to zero.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     template<typename Int_type> void push_back_decimal(int tag, Int_type mantissa, Int_type exponent) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (next_ >= buffer_end_) details::throw_range_error();
         *next_++ = '=';
-        next_ = details::dtoa(mantissa, exponent, next_);
+        next_ = details::dtoa(mantissa, exponent, next_, buffer_end_);
+        if (next_ >= buffer_end_) details::throw_range_error();
         *next_++ = '\x01';
     }
 //@}
@@ -624,13 +743,19 @@ public:
 
     /*!
     \brief Append a LocalMktDate or UTCDate field to the message.
+
     \param tag FIX tag.
     \param year Year.
     \param month Month.
     \param day Day.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_date(int tag, int year, int month, int day) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < details::len("=YYYYMMDD|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(year, next_, next_ + 4);
         next_ += 4;
@@ -642,12 +767,18 @@ public:
     }
     /*!
     \brief Append a month-year field to the message.
+
     \param tag FIX tag.
     \param year Year.
     \param month Month.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_monthyear(int tag, int year, int month) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < details::len("=YYYYMM|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(year, next_, next_ + 4);
         next_ += 4;
@@ -667,9 +798,14 @@ public:
     \param hour Hour.
     \param minute Minute.
     \param second Second.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_timeonly(int tag, int hour, int minute, int second) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < details::len("=HH:MM:SS|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(hour, next_, next_ + 2);
         next_ += 2;
@@ -692,9 +828,14 @@ public:
     \param minute Minute.
     \param second Second.
     \param millisecond Millisecond.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_timeonly(int tag, int hour, int minute, int second, int millisecond) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < details::len("=HH:MM:SS.sss|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(hour, next_, next_ + 2);
         next_ += 2;
@@ -724,9 +865,15 @@ public:
     \param hour Hour.
     \param minute Minute.
     \param second Second.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_timestamp(int tag, int year, int month, int day, int hour, int minute, int second) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+
+        if (buffer_end_ - next_ < details::len("=YYYYMMDD-HH:MM:SS|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(year, next_, next_ + 4);
         next_ += 4;
@@ -759,9 +906,14 @@ public:
     \param minute Minute.
     \param second Second.
     \param millisecond Millisecond.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_timestamp(int tag, int year, int month, int day, int hour, int minute, int second, int millisecond) {
-        next_ = details::itoa(tag, next_);
+        next_ = details::itoa(tag, next_, buffer_end_);
+        if (buffer_end_ - next_ < details::len("=YYYYMMDD-HH:MM:SS.sss|")) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         itoa_padded(year, next_, next_ + 4);
         next_ += 4;
@@ -796,6 +948,9 @@ public:
 
     \param tag FIX tag.
     \param date Date.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
+
     \see HFFIX_NO_BOOST_DATETIME
     */
     void push_back_date(int tag, boost::gregorian::date date) {
@@ -812,6 +967,9 @@ public:
 
     \param tag FIX tag.
     \param timeonly Time.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
+
     \see HFFIX_NO_BOOST_DATETIME
     */
     void push_back_timeonly(int tag, boost::posix_time::time_duration timeonly) {
@@ -834,6 +992,9 @@ public:
 
     \param tag FIX tag.
     \param timestamp Date and time.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
+
     \see HFFIX_NO_BOOST_DATETIME
     */
     void push_back_timestamp(int tag, boost::posix_time::ptime timestamp) {
@@ -880,13 +1041,21 @@ public:
     \param tag_data FIX tag for the data field.
     \param begin Pointer to the beginning of the data.
     \param end Pointer to after-the-end of the data.
+
+    \throw std::out_of_range When the remaining buffer size is too small.
     */
     void push_back_data(int tag_data_length, int tag_data, char const* begin, char const* end) {
-        next_ = details::itoa(tag_data_length, next_);
+        next_ = details::itoa(tag_data_length, next_, buffer_end_);
+        if (next_ == buffer_end_) details::throw_range_error();
         *next_++ = '=';
-        next_ = details::itoa(end - begin, next_);
+        next_ = details::itoa(end - begin, next_, buffer_end_);
+        if (next_ == buffer_end_) details::throw_range_error();
         *next_++ = '\x01';
-        next_ = details::itoa(tag_data, next_);
+        next_ = details::itoa(tag_data, next_, buffer_end_);
+
+        if (buffer_end_ - next_ < (end - begin) + 2) {
+            details::throw_range_error();
+        }
         *next_++ = '=';
         memcpy(next_, begin, end - begin);
         next_ += end - begin;
@@ -904,7 +1073,7 @@ private:
     }
 
     char* buffer_;
-    char* buffer_end_; // TODO check in all methods for overflow of buffer and throw.
+    char* buffer_end_;
     char* next_;
     char* body_length_; // Pointer to the location at which the BodyLength should be written, once the length of the message is known. 6 chars, which allows for messagelength up to 999,999.
 };
@@ -915,19 +1084,37 @@ class message_reader_const_iterator;
 /*!
  * \brief FIX field value for hffix::message_reader.
  *
- * FIX field values are weakly-typed as an array of chars, usually ASCII. Type conversion methods are provided.
+ * <h3>Usage</h3>
  *
- * This class is essentially equivalent to a `boost::range<char*>`.
+ * This class is a range `begin(),end()` of pointers into
+ * a `message_reader` buffer which delimit the value for one field.
+ *
+ * FIX field values are an array of chars, and are usually ASCII.
+ * Type conversion deserialization is provided by the `as_` family
+ * of methods.
+ *
+ * <h3>Extension</h3>
+ *
+ * Keep in mind that if you don't like the way any of the the `as_` methods
+ * perform deserialization for a type, then you can deserialize the field value
+ * yourself, by reading the string delimited by `begin(),end()`.
+ *
+ * For example, these two statements should be equivalent for a `field_value v`:
+ *
+ * \code
+ * int i = v.as_int();
+ * int i = boost::lexical_cast<int>(v.begin(), v.size());
+ * \endcode
 */
 class field_value {
 public:
 
-    /*! \brief Pointer to the beginning of the field value. */
+    /*! \brief Pointer to the beginning of the field value in the buffer. */
     char const* begin() const {
         return begin_;
     }
 
-    /*! \brief Pointer to past-the-end of the field value. */
+    /*! \brief Pointer to past-the-end of the field value in the buffer. */
     char const* end() const {
         return end_;
     }
@@ -943,6 +1130,7 @@ public:
     */
     inline friend bool operator==(field_value const& that, char const* cstring) {
         return !strncmp(that.begin(), cstring, that.size()) && !cstring[that.size()];
+        // TODO Is this correct? Maybe getting too fancy here trying to avoid call to strlen.
     }
 
     /*!
@@ -950,20 +1138,6 @@ public:
     */
     inline friend bool operator==(char const* cstring, field_value const& that) {
         return that == cstring;
-    }
-
-    /*!
-    \brief True if the value of the field is equal to the string argument.
-    */
-    inline friend bool operator==(field_value const& that, std::string const& s) {
-        return that.size() == s.size() && !strncmp(that.begin(), s.data(), that.size());
-    }
-
-    /*!
-    \brief True if the value of the field is equal to the string argument.
-    */
-    inline friend bool operator==(std::string const& s, field_value const& that) {
-        return that == s;
     }
 
     /*!
@@ -981,6 +1155,20 @@ public:
     }
 
     /*!
+    \brief True if the value of the field is equal to the string argument.
+    */
+    inline friend bool operator==(field_value const& that, std::string const& s) {
+        return that.size() == s.size() && !strncmp(that.begin(), s.data(), that.size());
+    }
+
+    /*!
+    \brief True if the value of the field is equal to the string argument.
+    */
+    inline friend bool operator==(std::string const& s, field_value const& that) {
+        return that == s;
+    }
+
+    /*!
     \brief True if the value of the field is not equal to the string argument.
     */
     inline friend bool operator!=(field_value const& that, std::string const& s) {
@@ -993,6 +1181,36 @@ public:
     inline friend bool operator!=(std::string const& s, field_value const& that) {
         return !(that == s);
     }
+
+#if __cplusplus >= 201703L
+    /*!
+    \brief True if the value of the field is equal to the string_view argument.
+    */
+    inline friend bool operator==(field_value const& that, std::string_view s) {
+        return std::equal(that.begin(), that.end(), s.begin(), s.end());
+    }
+
+    /*!
+    \brief True if the value of the field is equal to the string_view argument.
+    */
+    inline friend bool operator==(std::string_view s, field_value const& that) {
+        return that == s;
+    }
+
+    /*!
+    \brief True if the value of the field is not equal to the string_view argument.
+    */
+    inline friend bool operator!=(field_value const& that, std::string_view s) {
+        return !(that == s);
+    }
+
+    /*!
+    \brief True if the value of the field is not equal to the string_view argument.
+    */
+    inline friend bool operator!=(std::string_view s, field_value const& that) {
+        return !(that == s);
+    }
+#endif
 
     /*!
      * \brief Stream out the raw text value of the field.
@@ -1409,8 +1627,8 @@ public:
 
 private:
     friend class message_reader;
-    message_reader const* message_reader_;
-    char const* buffer_;
+    message_reader const* message_reader_; // pointer to the message_reader for this iterator
+    char const* buffer_; // pointer to the first character of the ascii tag number for the current_ field
     field current_;
 
     void increment();
@@ -1579,6 +1797,21 @@ public:
         init();
     }
 
+    /*!
+    \brief Construct on an array reference to a buffer.
+    \tparam N The size of the array.
+    \param buffer An array reference. The reader will read from the entire array of length _N_.
+    */
+    template<size_t N>
+    message_reader(const char(&buffer)[N]) :
+        buffer_(buffer),
+        buffer_end_(&(buffer[N])),
+        begin_(*this, 0),
+        end_(*this, 0),
+        is_complete_(false),
+        is_valid_(true) {
+        init();
+    }
 
     /*!
      * \brief Owns no resources, so destruction is no-op.
@@ -1935,10 +2168,10 @@ inline void message_reader_const_iterator::increment()
     }
 
     // move past the '='.
-    current_.value_.end_ = ++current_.value_.begin_;
+    ++current_.value_.begin_;
 
-    while(*(++current_.value_.end_ ) != '\x01') {}
-
+    // find the end of the field value
+    current_.value_.end_ = std::find(current_.value_.begin_, message_reader_->message_end(), '\x01');
     if (details::is_tag_a_data_length(current_.tag_)) {
         size_t data_len = details::atou<size_t>(current_.value_.begin_, current_.value_.end_);
 
@@ -1959,7 +2192,7 @@ inline void message_reader_const_iterator::increment()
         //     message_reader_->invalid(); // in theory this can never happen.
         // }
     }
-};
+}
 
 /* @cond EXCLUDE */
 
@@ -2011,7 +2244,7 @@ template <typename AssociativeContainer> struct field_name_streamer {
 template <typename AssociativeContainer> details::field_name_streamer<AssociativeContainer> field_name(int tag, AssociativeContainer const& field_dictionary, bool or_number = true)
 {
     return details::field_name_streamer<AssociativeContainer>(tag, field_dictionary, or_number);
-};
+}
 
 } // namespace hffix
 
